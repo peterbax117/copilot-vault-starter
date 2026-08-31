@@ -1,0 +1,13 @@
+{
+  "name": "my-vault",
+  "remote_slug": "<YOUR_GITHUB_USER>/<YOUR_VAULT_REPO>",
+  "gh_user": "<YOUR_GITHUB_USER>",
+  "mirror_path": "",
+  "task_name": "CopilotVaultSync",
+  "required_files": ["user.md", "memory.md", "copilot-instructions.md"],
+  "bootstrap_files": ["user.md", "memory.md", "core/identity-core.md", "archive/learned-rules.md"],
+  "mirror_files": ["user.md", "memory.md", "copilot-instructions.md", "README.md"],
+  "mirror_dirs": ["archive", "core"],
+  "open_handoff_cap": 12,
+  "core_canonical": true
+}

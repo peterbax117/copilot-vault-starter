@@ -1,0 +1,6 @@
+# Lesson-capture queue
+
+`Add-Lesson.ps1` appends one Markdown file per correction/preference here. They
+stay until a `qlearn` pass promotes them into `archive/learned-rules.md` and
+`Resolve-Lessons.ps1` files them into `processed/` or `rejected/` (local-only).
+This `.gitkeep` just keeps the empty folder in git.

@@ -1,0 +1,33 @@
+# ms-copilot-vault — only track agent-critical text files
+*
+!.gitignore
+!README.md
+!copilot-instructions.md
+!user.md
+!memory.md
+!bootstrap.ps1
+!vault.config.json
+# Shared engine, kept identical across vaults by core/scripts/Sync-Core.ps1
+!core/
+!core/**
+!scripts/
+!scripts/*.ps1
+!archive/
+!archive/*.md
+!archive/_legacy/
+!archive/_legacy/*.md
+# Self-improving vault: capture queue. Track pending lessons (top-level *.md)
+# so they propagate across sessions; processed/ and rejected/ stay local-only.
+!inbox/
+!inbox/*.md
+# Projects: long-running initiative charters. Synced (durable) unlike handoffs/.
+!projects/
+!projects/*.md
+# Handoffs: session continuity. OPEN handoffs + index.md sync (cross-machine
+# resume + machine-loss recovery); DONE handoffs are moved to handoffs/_done/
+# by `qdone` and stay local-only (not pushed). _done/ is NOT un-ignored below.
+!handoffs/
+!handoffs/*.md
+
+# Per-launch vault-gate sentinel written by the copilot() profile wrapper
+.vault-checked.json
