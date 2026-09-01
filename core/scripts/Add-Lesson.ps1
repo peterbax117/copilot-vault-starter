@@ -68,4 +68,3 @@ want: $Want
 
 Set-Content -Path $file -Value $entry -Encoding UTF8
 if (-not $Quiet) { Write-Host "Captured lesson $id -> inbox\$stamp-$id.md" -ForegroundColor Green }
-
