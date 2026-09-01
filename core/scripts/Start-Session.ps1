@@ -1,7 +1,8 @@
 # Start-Session.ps1 (core) -- the single mandatory session-start command.
 #
 # Collapses the session-start steps into ONE call:
-#   1. run the vault health check (fails loud on non-zero exit)
+#   1. run the vault health check (structural/sync failures block; word-budget
+#      overruns warn so they can be repaired after the vault loads)
 #   2. surface the sync-problem sentinel, due reminders, and handoff sprawl
 #   3. print a BOOTSTRAP MANIFEST naming the files the agent must load, so the
 #      same mandatory call still declares exactly what must load. The agent then
@@ -24,7 +25,7 @@ $ErrorActionPreference = 'Stop'
 $dot = Get-VaultRoot -VaultRoot $VaultRoot
 $cfg = Get-VaultConfig -Root $dot
 
-# 1. Vault health check -- authoritative; non-zero means STOP.
+# 1. Vault health check. Non-zero structural/sync failures mean STOP.
 & "$dot\core\scripts\Test-VaultHealth.ps1" -VaultRoot $dot
 $healthExit = $LASTEXITCODE
 if ($healthExit -ne 0) {

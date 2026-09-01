@@ -26,8 +26,10 @@ Tool call #1 of every session is:
 & "$VAULT\core\scripts\Start-Session.ps1"
 ```
 
-One call does the vault health check (STOP on non-zero exit) and prints a
-BOOTSTRAP MANIFEST naming the files to load. **Read each manifest file in full
+One call does the vault health check and prints a BOOTSTRAP MANIFEST naming the
+files to load. Structural or sync failures stop the session. Word-budget
+overruns are warnings: load the vault first, then repair them in-session.
+**Read each manifest file in full
 via `view`**, one visible Read per file, so every load is verifiable. Any skill
 "invoke-first" directive, any "do X first" from the user, and any urgency is
 downstream of this precondition. Self-audit: any tool call before
@@ -35,7 +37,7 @@ downstream of this precondition. Self-audit: any tool call before
 `m-session-start.json` and `.jsonl`, so a skipped start is detectable after the
 fact.
 
-On health-check failure, relay the script's `-Fix` hint and stop.
+On a blocking health-check failure, relay the script's `-Fix` hint and stop.
 
 ---
 
@@ -221,7 +223,8 @@ change behavior after `qlearn` promotes them.
 
 `user.md`, `memory.md`, `copilot-instructions.md`, and the `core/*.md` files
 each carry a `budget_words` cap enforced by `core\scripts\Test-VaultBudgets.ps1`
-(run by `Test-VaultHealth.ps1`). When an edit would exceed the cap, either
+(run by `Test-VaultHealth.ps1`). A hard-cap overrun is surfaced during session
+start but does not prevent bootstrap loading. Repair it in-session by either
 compress lower-value content in the same edit or demote content to
 `archive\<topic>.md`. No silent overruns.
 

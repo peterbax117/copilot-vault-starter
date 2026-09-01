@@ -3,7 +3,8 @@
 # Vault-agnostic port. The vault root is itself the git working tree (no
 # symlinks). Verifies: required files present and non-empty, git repo intact,
 # scheduled task alive, sync state shows recent success, no unpushed commits,
-# no sentinel, budgets within caps, core not drifted from canonical.
+# no sentinel, and core not drifted from canonical. Budget overruns are
+# advisory so the vault can still load and be repaired in-session.
 
 [CmdletBinding()]
 param(
@@ -121,12 +122,12 @@ if (Test-Path $sentinel) {
     $problems += "Sentinel file present (>=3 consecutive failures): $sentinel"
 }
 
-# 6. Budget check
+# 6. Budget check (advisory)
 $budgetScript = "$dot\core\scripts\Test-VaultBudgets.ps1"
 if (Test-Path $budgetScript) {
     & $budgetScript -VaultRoot $dot -Quiet
     if ($LASTEXITCODE -ne 0) {
-        $problems += "Budget check failed. Run core\scripts\Test-VaultBudgets.ps1 to see which file(s) exceed hard_cap_words"
+        Write-Host "! Vault word budget exceeded. Load the vault, then run core\scripts\Test-VaultBudgets.ps1 and repair it in-session." -ForegroundColor Yellow
     }
 }
 
