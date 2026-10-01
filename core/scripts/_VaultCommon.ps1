@@ -6,8 +6,6 @@
 # The core engine is vault-agnostic: the same scripts drive the work vault
 # (~/.copilot) and the personal vault (~/.copilot-personal). Everything that
 # differs between the two lives in <root>\vault.config.json.
-#
-# ASCII-only on purpose: may run under Windows PowerShell 5.1 or a scheduled task.
 
 function Get-VaultRoot {
     <#
@@ -43,6 +41,8 @@ function Get-VaultConfig {
         gh_user          = ''
         mirror_path      = ''
         task_name        = 'CopilotVaultSync'
+        sync_branch      = 'main'
+        memory_publication_guard = $true
         required_files   = @('user.md', 'memory.md', 'copilot-instructions.md')
         bootstrap_files  = @('user.md', 'memory.md', 'archive/learned-rules.md')
         mirror_files     = @('user.md', 'memory.md', 'copilot-instructions.md', 'README.md')
@@ -84,4 +84,18 @@ function Get-VaultWordCount {
     #>
     param([Parameter(Mandatory)][string]$Text)
     return [regex]::Matches($Text, '\S+').Count
+}
+
+function Get-VaultTextSha256 {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+
+    $normalized = $Text.Replace("`r`n", "`n")
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString(
+            $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized))
+        )).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
 }

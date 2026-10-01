@@ -51,7 +51,7 @@ if (-not (Test-Path "$dot\archive")) {
 }
 
 # 3. Sync state freshness + push health
-$stateAhead = 0
+$stateAhead = $null
 if (Test-Path $stateFile) {
     try {
         $state = Get-Content $stateFile -Raw | ConvertFrom-Json
@@ -64,11 +64,17 @@ if (Test-Path $stateFile) {
         } else {
             $problems += "Sync state has no last_run timestamp"
         }
-        if ([int]$state.consecutive_failures -ge 1) {
+        if (-not ($state.PSObject.Properties.Name -contains 'consecutive_failures') -or $null -eq $state.consecutive_failures) {
+            $problems += "Sync state has no consecutive_failures telemetry"
+        } elseif ([int]$state.consecutive_failures -ge 1) {
             $problems += "Sync has $($state.consecutive_failures) consecutive failure(s); last error: $($state.last_error)"
         }
-        $stateAhead = [int]$state.ahead_of_origin
-        if ($stateAhead -gt 0) {
+        if (-not ($state.PSObject.Properties.Name -contains 'ahead_of_origin') -or $null -eq $state.ahead_of_origin) {
+            $problems += "Sync state has no ahead_of_origin telemetry"
+        } else {
+            $stateAhead = [int]$state.ahead_of_origin
+        }
+        if ($null -ne $stateAhead -and $stateAhead -gt 0) {
             $problems += "Local is $stateAhead commits ahead of origin (unpushed)"
         }
     } catch {
@@ -86,13 +92,19 @@ if (Test-Path $stateFile) {
 if (Get-Command git -ErrorAction SilentlyContinue) {
     try {
         $aheadRaw = & git -C $dot rev-list --count '@{upstream}..HEAD' 2>$null
-        if ($LASTEXITCODE -eq 0 -and $aheadRaw) {
+        if ($LASTEXITCODE -ne 0 -or -not $aheadRaw) {
+            $problems += "Cannot inspect live upstream state (git exit $LASTEXITCODE)"
+        } else {
             $liveAhead = [int]("$aheadRaw".Trim())
-            if ($liveAhead -gt 0 -and $stateAhead -le 0) {
+            if ($liveAhead -gt 0 -and ($null -eq $stateAhead -or $stateAhead -le 0)) {
                 $problems += "Local is $liveAhead commit(s) ahead of origin (unpushed; newer than the last sync-state write)"
             }
         }
-    } catch { }
+    } catch {
+        $problems += "Cannot inspect live upstream state: $_"
+    }
+} else {
+    $problems += "Cannot inspect live upstream state: git is unavailable"
 }
 
 # 4. Scheduled task alive
@@ -107,12 +119,16 @@ if ($LASTEXITCODE -ne 0 -or -not $taskCsv) {
     $problems += "Scheduled task '$($cfg.task_name)' not registered"
 } else {
     try {
-        $status = @($taskCsv | ConvertFrom-Csv)[0].Status
+        $taskRows = @($taskCsv | ConvertFrom-Csv)
+        if ($taskRows.Count -lt 1 -or [string]::IsNullOrWhiteSpace("$($taskRows[0].Status)")) {
+            throw "Missing task status"
+        }
+        $status = $taskRows[0].Status
         if ($status -eq 'Disabled') {
             $problems += "Scheduled task '$($cfg.task_name)' is disabled"
         }
     } catch {
-        # Unparseable output is not worth blocking a session over.
+        $problems += "Cannot parse scheduled task status for '$($cfg.task_name)'"
     }
 }
 
@@ -127,7 +143,7 @@ $budgetScript = "$dot\core\scripts\Test-VaultBudgets.ps1"
 if (Test-Path $budgetScript) {
     & $budgetScript -VaultRoot $dot -Quiet
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "! Vault word budget exceeded. Load the vault, then run core\scripts\Test-VaultBudgets.ps1 and repair it in-session." -ForegroundColor Yellow
+        Write-Host "! Vault word budget exceeded or could not be checked. Load the vault, then run core\scripts\Test-VaultBudgets.ps1 and repair it in-session." -ForegroundColor Yellow
     }
 }
 

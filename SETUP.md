@@ -100,6 +100,7 @@ Edit `$VAULT\vault.config.json`:
 | `mirror_path` | a cloud-synced folder to mirror curated files to, or `""` for none. Env vars like `%USERPROFILE%` are expanded. |
 | `task_name` | leave as `"CopilotVaultSync"` unless it collides |
 | `core_canonical` | `true` for a single vault. Only set to `false` on a second vault that pulls `core/` from a canonical one. |
+| `memory_publication_guard` | leave as `false`. `true` restricts auto-sync to memory files and requires a PR workflow for everything else. |
 
 Leave the `*_files` / `*_dirs` / `open_handoff_cap` defaults unless you have a
 reason to change them.

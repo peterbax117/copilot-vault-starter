@@ -4,14 +4,12 @@
 # root and every per-vault setting (remote, gh account, mirror target, task
 # name) come from <root>\vault.config.json via _VaultCommon.ps1.
 #
-# The vault root is itself the git working tree. Its .gitignore is an allowlist
-# (`*` then `!` exceptions), so only curated files are ever committed.
+# Only eligible memory changes may be auto-published. Runtime and governance
+# changes require a PR and approved activation from the remote sync branch.
 #
 # Safe to run frequently (scheduled task every 15 min). Writes structured state
 # to m-vault-sync-state.json so Test-VaultHealth.ps1 can surface failures at
 # session start.
-#
-# ASCII-only on purpose: may run under Windows PowerShell 5.1 or a task.
 
 [CmdletBinding()]
 param(
@@ -42,19 +40,101 @@ function Write-Log($msg) {
 
 function Read-State {
     if (Test-Path $stateFile) {
-        try { return (Get-Content $stateFile -Raw | ConvertFrom-Json) } catch { }
+        try { return (Get-Content $stateFile -Raw -ErrorAction Stop | ConvertFrom-Json) } catch {
+            throw "Sync state read failed: $_"
+        }
     }
     return [pscustomobject]@{
         last_run             = $null
         last_success         = $null
         consecutive_failures = 0
         last_error           = $null
+        last_failure_stage   = $null
         ahead_of_origin      = 0
     }
 }
 
 function Write-State($state) {
     $state | ConvertTo-Json | Set-Content -Path $stateFile -Encoding UTF8
+}
+
+function Invoke-VaultGit {
+    param([string[]]$Arguments, [string]$Operation, [switch]$AllowFailure)
+
+    $previousPreference = $ErrorActionPreference
+    try {
+        # PS5 treats native stderr as an error even when git exits successfully.
+        $ErrorActionPreference = 'Continue'
+        $output = @(& git -C $dot @Arguments 2>&1)
+        $gitExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    $text = $output -join "`n"
+    if ($gitExit -ne 0 -and -not $AllowFailure) {
+        throw "Git $Operation failed (exit $gitExit): $text"
+    }
+    # Parsed output must be stdout only: git writes warnings (for example
+    # LF/CRLF notices) to stderr, and mixing them in corrupts -z path lists (#34).
+    $stdout = @($output | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
+    $stderr = @($output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }) -join "`n"
+    return [pscustomobject]@{ ExitCode = $gitExit; Output = $stdout; Stderr = $stderr; Text = $text }
+}
+
+function Test-VaultPublicationGuard {
+    # On unless the setting is the JSON boolean false. No working-tree value may
+    # choose which config is trusted: once the repo has any remote-tracking ref
+    # or an upstream, only the config published on HEAD's real upstream counts,
+    # and anything unreadable keeps the guard on. Only a vault that has never
+    # fetched or pushed (starter bootstrap) uses its working-tree config.
+    $upstream = Invoke-VaultGit -Arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}') -Operation 'upstream inspection' -AllowFailure
+    $remoteRefs = Invoke-VaultGit -Arguments @('for-each-ref', '--count=1', '--format=%(refname)', 'refs/remotes') -Operation 'remote ref inspection' -AllowFailure
+    if ($remoteRefs.ExitCode -ne 0) { return $true }
+    if ($upstream.ExitCode -ne 0 -and -not $remoteRefs.Output.Trim()) {
+        $value = $cfg.memory_publication_guard
+    } elseif ($upstream.ExitCode -eq 0) {
+        # Trust only origin/<current branch>; anything else keeps the guard on.
+        $branch = Invoke-VaultGit -Arguments @('symbolic-ref', '--quiet', '--short', 'HEAD') -Operation 'branch inspection' -AllowFailure
+        if ($branch.ExitCode -ne 0) { return $true }
+        $expected = "refs/remotes/origin/$($branch.Output.Trim())"
+        $upstreamFull = Invoke-VaultGit -Arguments @('rev-parse', '--symbolic-full-name', '@{upstream}') -Operation 'upstream inspection' -AllowFailure
+        if ($upstreamFull.ExitCode -ne 0 -or $upstreamFull.Output.Trim() -cne $expected) { return $true }
+        $shown = Invoke-VaultGit -Arguments @('show', "${expected}:vault.config.json") -Operation 'published config inspection' -AllowFailure
+        if ($shown.ExitCode -ne 0) { return $true }
+        try { $published = $shown.Output | ConvertFrom-Json -ErrorAction Stop } catch { return $true }
+        $value = $published.memory_publication_guard
+    } else {
+        return $true
+    }
+    return -not (($value -is [bool]) -and (-not $value))
+}
+
+function Assert-VaultMemoryPublication {
+    if (-not (Test-VaultPublicationGuard)) { return }
+    $branch = (Invoke-VaultGit -Arguments @('symbolic-ref', '--quiet', '--short', 'HEAD') -Operation 'branch inspection').Output.Trim()
+    if ($branch -cne $cfg.sync_branch) {
+        throw "Auto-sync requires branch '$($cfg.sync_branch)', not '$branch'. Use an issue-linked PR for development."
+    }
+    $upstream = (Invoke-VaultGit -Arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}') -Operation 'upstream inspection').Output.Trim()
+    if ($upstream -cne "origin/$($cfg.sync_branch)") {
+        throw "Auto-sync requires upstream 'origin/$($cfg.sync_branch)', not '$upstream'."
+    }
+    $dirty = (Invoke-VaultGit -Arguments @('diff', '--name-only', '--no-renames', '-z', 'HEAD', '--') -Operation 'working-tree inspection').Output
+    $staged = (Invoke-VaultGit -Arguments @('diff', '--cached', '--name-only', '--no-renames', '-z', '--') -Operation 'index inspection').Output
+    $untracked = (Invoke-VaultGit -Arguments @('ls-files', '--others', '--exclude-standard', '-z') -Operation 'untracked-file inspection').Output
+    # Inspect every local commit, not just its net diff: a revert still publishes history.
+    $committed = (Invoke-VaultGit -Arguments @('log', '--format=', '--name-only', '--no-renames', '-z', '-m', '@{upstream}..HEAD', '--') -Operation 'pending-history inspection').Output
+    $blocked = @(
+        "$dirty`0$staged`0$untracked`0$committed".Split([char]0) |
+            ForEach-Object { $_.Trim([char[]]"`r`n") } |
+            Where-Object {
+                $_ -and $_ -notmatch '^(?:(?:user|memory)\.md|(?:archive|projects|handoffs|inbox)/[^/]+\.md)$'
+            } |
+            Sort-Object -Unique
+    )
+    if ($blocked.Count -gt 0) {
+        throw "Runtime/governance changes require an issue-linked PR and approved activation: $($blocked -join '; ')"
+    }
 }
 
 function Invoke-VaultPush {
@@ -78,15 +158,15 @@ function Invoke-VaultPush {
 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         if ($useHelper) {
-            $pushOut = git -c "credential.helper=" -c "credential.helper=$helper" push 2>&1
+            $pushResult = Invoke-VaultGit -Arguments @('-c', 'credential.helper=', '-c', "credential.helper=$helper", 'push') -Operation 'push' -AllowFailure
         } else {
-            $pushOut = git push 2>&1
+            $pushResult = Invoke-VaultGit -Arguments @('push') -Operation 'push' -AllowFailure
         }
+        $pushOut = $pushResult.Text
 
-        if ($LASTEXITCODE -eq 0) {
+        if ($pushResult.ExitCode -eq 0) {
             # Do not trust the exit code alone: verify nothing is still ahead.
-            $stillAhead = 0
-            try { $stillAhead = [int](git rev-list --count '@{u}..HEAD' 2>$null) } catch { $stillAhead = 0 }
+            $stillAhead = [int](Invoke-VaultGit -Arguments @('rev-list', '--count', '@{upstream}..HEAD') -Operation 'post-push inspection').Output
             if ($stillAhead -eq 0) {
                 return @{ ok = $true; attempts = $attempt }
             }
@@ -122,29 +202,61 @@ To investigate:
 }
 
 Set-Location $dot
-$state = Read-State
-$state.last_run = (Get-Date).ToString('o')
+$state = [pscustomobject]@{
+    last_run = $null; last_success = $null; consecutive_failures = 0
+    last_error = $null; last_failure_stage = $null; ahead_of_origin = 0
+}
+$activeStage = 'state-read'
+$failureStage = $null
 $runError = $null
+try {
+    $state = Read-State
+} catch {
+    $runError = "$_"
+}
+if (-not ($state.PSObject.Properties.Name -contains 'last_failure_stage')) {
+    $state | Add-Member -NotePropertyName last_failure_stage -NotePropertyValue $null
+}
+$state.last_run = (Get-Date).ToString('o')
 
 try {
-    $status = git status --porcelain 2>$null
+    if ($runError) { throw $runError }
+    $activeStage = 'publication-policy'
+    Assert-VaultMemoryPublication
+    $activeStage = 'git-status'
+    $status = (Invoke-VaultGit -Arguments @('status', '--porcelain') -Operation 'status').Output
 
     if ($status) {
         Write-Log "Changes detected, committing"
-        git add -A 2>&1 | Out-Null
+        $activeStage = 'git-staging'
+        Invoke-VaultGit -Arguments @('add', '-A') -Operation 'staging' | Out-Null
+        $activeStage = 'publication-policy'
+        Assert-VaultMemoryPublication
         $msg = "auto: vault sync $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
-        git commit -m $msg 2>&1 | Out-Null
+        $activeStage = 'git-commit'
+        Invoke-VaultGit -Arguments @('commit', '-m', $msg) -Operation 'commit' | Out-Null
         Write-Log "Committed: $msg"
     } else {
         Write-Log "No changes"
     }
 
     # Always check ahead-of-origin (covers cases where prior pushes failed).
-    $ahead = 0
-    try { $ahead = [int](git rev-list --count '@{u}..HEAD' 2>$null) } catch { $ahead = 0 }
+    $activeStage = 'publication-policy'
+    Assert-VaultMemoryPublication
+    $activeStage = 'git-upstream'
+    $noUpstream = (-not (Test-VaultPublicationGuard)) -and
+        ((Invoke-VaultGit -Arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}') -Operation 'upstream inspection' -AllowFailure).ExitCode -ne 0)
+    if ($noUpstream) {
+        # Unguarded fresh vault (starter bootstrap) before its first push.
+        Write-Log "No upstream configured yet; skipping push. Publish once with: git push -u origin HEAD"
+        $ahead = 0
+    } else {
+        $ahead = [int](Invoke-VaultGit -Arguments @('rev-list', '--count', '@{upstream}..HEAD') -Operation 'pending-commit inspection').Output
+    }
     $state.ahead_of_origin = $ahead
 
     if ($ahead -gt 0 -and -not $NoPush) {
+        $activeStage = 'git-push'
         Write-Log "Local is $ahead commits ahead of origin; attempting push"
         $push = Invoke-VaultPush
         if ($push.ok) {
@@ -152,11 +264,15 @@ try {
             $state.ahead_of_origin = 0
         } else {
             $runError = $push.error
+            $failureStage = 'git-push'
             Write-Log "PUSH FAILED: $runError"
         }
     }
 
     if (-not $NoMirror -and $mirror) {
+        $activeStage = 'publication-policy'
+        Assert-VaultMemoryPublication
+        $activeStage = 'mirror'
         New-Item -ItemType Directory -Force -Path $mirror | Out-Null
         foreach ($f in $cfg.mirror_files) {
             $src = Join-Path $dot $f
@@ -170,16 +286,19 @@ try {
     }
 } catch {
     $runError = "$_"
+    if (-not $failureStage) { $failureStage = $activeStage }
     Write-Log "ERROR: $runError"
 }
 
 if ($runError) {
     $state.consecutive_failures = [int]$state.consecutive_failures + 1
     $state.last_error = $runError
+    $state.last_failure_stage = $failureStage
 } else {
     $state.consecutive_failures = 0
     $state.last_success = $state.last_run
     $state.last_error = $null
+    $state.last_failure_stage = $null
 }
 
 Write-State $state

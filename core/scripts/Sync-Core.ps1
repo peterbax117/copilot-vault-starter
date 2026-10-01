@@ -28,7 +28,10 @@
 # is passed, because Test-VaultHealth.ps1 runs -CheckOnly on every session
 # start. Session start must stay fast and must work offline.
 #
-# Exit codes: 0 = in sync or synced, 1 = error, 2 = drift found (-CheckOnly).
+# Copies reject target-only files before writing, never delete them, and
+# verify parity afterward. Copy failures may leave a partial update.
+# Exit codes: 0 = in sync, verified copy, or existing no-op/preview path;
+# 1 = error or rejected copy; 2 = drift found (-CheckOnly).
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -48,11 +51,11 @@ $cfg = Get-VaultConfig -Root $dot
 function Say($msg, $color = 'Gray') { if (-not $Quiet) { Write-Host $msg -ForegroundColor $color } }
 
 function Get-CoreFingerprint([string]$coreDir) {
-    if (-not (Test-Path $coreDir)) { return @{} }
-    $map = @{}
-    foreach ($f in Get-ChildItem -Path $coreDir -Recurse -File) {
+    $map = [hashtable]::new([StringComparer]::OrdinalIgnoreCase)
+    if (-not (Test-Path -LiteralPath $coreDir)) { return $map }
+    foreach ($f in Get-ChildItem -LiteralPath $coreDir -Recurse -File -Force) {
         $rel = $f.FullName.Substring($coreDir.Length).TrimStart('\')
-        $map[$rel] = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash
+        $map[$rel] = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
     }
     return $map
 }
@@ -70,12 +73,21 @@ function Compare-Core([hashtable]$src, [hashtable]$dst) {
 }
 
 function Copy-Core([string]$srcCore, [string]$dstCore) {
+    $extras = @(Compare-Core (Get-CoreFingerprint $srcCore) (Get-CoreFingerprint $dstCore) |
+        Where-Object { $_.StartsWith('EXTRA  ') })
+    if ($extras.Count -gt 0) {
+        throw "Core copy rejected; target-only files preserved and no copy started: $($extras -join '; ')"
+    }
     New-Item -ItemType Directory -Force -Path $dstCore | Out-Null
-    foreach ($f in Get-ChildItem -Path $srcCore -Recurse -File) {
+    foreach ($f in Get-ChildItem -LiteralPath $srcCore -Recurse -File -Force) {
         $rel    = $f.FullName.Substring($srcCore.Length).TrimStart('\')
         $target = Join-Path $dstCore $rel
         New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null
         Copy-Item -Force -LiteralPath $f.FullName -Destination $target
+    }
+    $remaining = @(Compare-Core (Get-CoreFingerprint $srcCore) (Get-CoreFingerprint $dstCore))
+    if ($remaining.Count -gt 0) {
+        throw "Core parity verification failed; target may be partially updated: $($remaining -join '; ')"
     }
 }
 

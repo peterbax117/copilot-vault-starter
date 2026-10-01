@@ -11,12 +11,11 @@
 #   4. write an audit marker so a skipped session-start is a detectable event.
 #
 # Vault-agnostic: works for any vault root with a vault.config.json.
-# ASCII-only on purpose: may run under Windows PowerShell 5.1 or a task.
 
 [CmdletBinding()]
 param(
     [string]$VaultRoot,
-    [switch]$Quiet  # suppress the bootstrap manifest (health check + sentinel only)
+    [switch]$Quiet  # suppress the manifest; prerequisite checks still run
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,6 +32,39 @@ if ($healthExit -ne 0) {
     Write-Host "SESSION-START BLOCKED: vault health check failed (exit $healthExit)." -ForegroundColor Red
     Write-Host "Report it and run: & `"$dot\core\scripts\Test-VaultHealth.ps1`" -Fix"
     exit $healthExit
+}
+
+# Validate bootstrap-only files too, before reminders or success markers change.
+$bootstrap = @()
+$bootstrapProblems = @()
+foreach ($rel in $cfg.bootstrap_files) {
+    try {
+        $f = Join-Path $dot ($rel -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $f -PathType Leaf)) {
+            $bootstrapProblems += "Missing bootstrap file or not a file: $rel"
+            continue
+        }
+        $text = Get-Content -LiteralPath $f -Raw -Encoding UTF8 -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            $bootstrapProblems += "Empty bootstrap file: $rel"
+            continue
+        }
+        $bootstrap += [pscustomobject]@{
+            Path  = [IO.Path]::GetFullPath($f)
+            Bytes = (Get-Item -LiteralPath $f -ErrorAction Stop).Length
+            Words = Get-VaultWordCount -Text $text
+            TextSha256 = Get-VaultTextSha256 -Text $text
+        }
+    } catch {
+        $bootstrapProblems += "Cannot read bootstrap file '$rel': $($_.Exception.Message)"
+    }
+}
+if ($bootstrapProblems.Count -gt 0) {
+    Write-Host ""
+    Write-Host "SESSION-START BLOCKED: bootstrap prerequisites failed." -ForegroundColor Red
+    $bootstrapProblems | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    Write-Host "Restore readable, non-empty bootstrap files and retry Start-Session.ps1."
+    exit 1
 }
 
 # Sync-problem sentinel (auto-sync failed >= 3x in a row).
@@ -109,16 +141,9 @@ if (-not $Quiet) {
     Write-Output "===== BOOTSTRAP MANIFEST -- READ EACH FILE BELOW IN FULL NOW ====="
     Write-Output ("  vault: {0}  [{1}]" -f $dot, $cfg.name)
     $i = 0
-    foreach ($rel in $cfg.bootstrap_files) {
+    foreach ($file in $bootstrap) {
         $i++
-        $f = Join-Path $dot ($rel -replace '/', '\')
-        if (Test-Path $f) {
-            $bytes = (Get-Item $f).Length
-            $words = Get-VaultWordCount -Text (Get-Content $f -Raw)
-            Write-Output ("  {0}. {1}  ({2} words, {3:N1} KB)" -f $i, $f, $words, ($bytes / 1KB))
-        } else {
-            Write-Output ("  {0}. {1}  [MISSING]" -f $i, $f)
-        }
+        Write-Output ("  {0}. {1}  ({2} words, {3:N1} KB)" -f $i, $file.Path, $file.Words, ($file.Bytes / 1KB))
     }
     Write-Output "Read all of the above via the view tool (one visible Read each), then post the turn-1 marker."
     Write-Output "===== END MANIFEST ====="
@@ -127,6 +152,18 @@ if (-not $Quiet) {
 # Audit marker: append one JSONL line per session-start + overwrite a "latest"
 # pointer, so a skipped start is detectable after the fact.
 $now = (Get-Date).ToString('o')
+$runId = [guid]::NewGuid().ToString()
+$receipt = [ordered]@{
+    version       = 1
+    run_id        = $runId
+    root          = [IO.Path]::GetFullPath($dot)
+    normalization = 'utf8-lf-v1'
+    files         = @($bootstrap | ForEach-Object {
+        [ordered]@{ path = $_.Path; text_sha256 = $_.TextSha256 }
+    })
+}
+$receiptJson = $receipt | ConvertTo-Json -Depth 5 -Compress
+$receiptHash = Get-VaultTextSha256 -Text $receiptJson
 $record = [ordered]@{
     started_at = $now
     vault      = $cfg.name
@@ -134,12 +171,15 @@ $record = [ordered]@{
     pid        = $PID
     host       = $env:COMPUTERNAME
     user       = $env:USERNAME
-    id         = [guid]::NewGuid().ToString()
+    id         = $runId
+    receipt_json   = $receiptJson
+    receipt_sha256 = $receiptHash
 }
-$json = ($record | ConvertTo-Json -Compress)
+$json = ($record | ConvertTo-Json -Depth 5 -Compress)
 Add-Content -Path (Join-Path $dot 'm-session-start.jsonl') -Value $json -Encoding utf8
 Set-Content -Path (Join-Path $dot 'm-session-start.json') -Value $json -Encoding utf8
 
 Write-Host ""
-Write-Host "session-start OK [$($cfg.name)]: vault healthy, bootstrap loaded, marker written ($now)." -ForegroundColor Green
+Write-Output "VAULT-STARTUP-RECEIPT-V1 id=$runId sha256=$receiptHash"
+Write-Host "session-start OK [$($cfg.name)]: vault healthy, bootstrap files verified, marker written ($now)." -ForegroundColor Green
 exit 0

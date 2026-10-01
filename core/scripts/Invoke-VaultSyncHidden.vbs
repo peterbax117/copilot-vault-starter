@@ -1,6 +1,6 @@
 ' Invoke-VaultSyncHidden.vbs -- truly hidden launcher for the vault sync task.
 '
-' powershell.exe -WindowStyle Hidden still creates a console window for a moment
+' pwsh.exe -WindowStyle Hidden still creates a console window for a moment
 ' before the style is applied, so the sync task flashes a black window on screen
 ' every time it runs. WScript.Shell.Run with windowStyle 0 creates the process
 ' with no window at all, so there is no flash.
@@ -13,7 +13,7 @@
 
 Option Explicit
 
-Dim objShell, root, cmd
+Dim objShell, root, cmd, childExit
 
 If WScript.Arguments.Count < 1 Then
     WScript.Quit 1
@@ -22,8 +22,9 @@ End If
 root = WScript.Arguments(0)
 
 Set objShell = CreateObject("WScript.Shell")
-cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & _
+cmd = "pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & _
       root & "\core\scripts\Sync-Vault.ps1"" -VaultRoot """ & root & """ -Quiet"
 
 ' 0 = no window, True = wait so the task reports real completion.
-objShell.Run cmd, 0, True
+childExit = objShell.Run(cmd, 0, True)
+WScript.Quit childExit

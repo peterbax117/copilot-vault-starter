@@ -9,5 +9,6 @@
   "mirror_files": ["user.md", "memory.md", "copilot-instructions.md", "README.md"],
   "mirror_dirs": ["archive", "core"],
   "open_handoff_cap": 12,
-  "core_canonical": true
+  "core_canonical": true,
+  "memory_publication_guard": false
 }

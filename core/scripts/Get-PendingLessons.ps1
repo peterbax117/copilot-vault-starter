@@ -23,6 +23,25 @@ function Get-Field([string]$key, [string]$src) {
     return ''
 }
 
+function Get-LessonBodyFields([string]$src, [string]$fileName) {
+    $fields = @{ Context = ''; Did = ''; Want = '' }
+    $seen = @{}
+    $labels = [regex]::Matches($src, '(?im)^[ \t]*(context|did|want)[ \t]*:[ \t]*')
+    for ($i = 0; $i -lt $labels.Count; $i++) {
+        $label = $labels[$i]
+        $key = $label.Groups[1].Value
+        if ($seen.ContainsKey($key)) {
+            throw "Duplicate lesson body field '$key' in '$fileName'; the body is ambiguous."
+        }
+        $seen[$key] = $true
+        $start = $label.Index + $label.Length
+        $end = if ($i + 1 -lt $labels.Count) { $labels[$i + 1].Index } else { $src.Length }
+        $length = $end - $start
+        $fields[$key] = $src.Substring($start, $length).Trim()
+    }
+    return [pscustomobject]$fields
+}
+
 $results = @()
 if (Test-Path $inbox) {
     foreach ($f in Get-ChildItem -Path $inbox -Filter *.md -File -ErrorAction SilentlyContinue) {
@@ -30,14 +49,15 @@ if (Test-Path $inbox) {
         if ($raw -notmatch '(?ms)\A---\s*\r?\n(.*?)\r?\n---\s*\r?\n(.*)') { continue }
         $fm = $matches[1]; $body = $matches[2]
         if ((Get-Field 'status' $fm) -ne 'pending') { continue }
+        $fields = Get-LessonBodyFields $body $f.Name
         $results += [pscustomobject]@{
             Id      = Get-Field 'id' $fm
             Created = Get-Field 'created_at' $fm
             Source  = Get-Field 'source' $fm
             Signal  = Get-Field 'signal' $fm
-            Context = Get-Field 'context' $body
-            Did     = Get-Field 'did' $body
-            Want    = Get-Field 'want' $body
+            Context = $fields.Context
+            Did     = $fields.Did
+            Want    = $fields.Want
             File    = $f.Name
         }
     }
